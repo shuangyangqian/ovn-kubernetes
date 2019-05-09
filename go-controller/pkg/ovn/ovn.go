@@ -3,8 +3,10 @@ package ovn
 import (
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/kube"
-	util "github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/values"
 	"github.com/sirupsen/logrus"
+	kapps "k8s.io/api/apps/v1"
 	kapi "k8s.io/api/core/v1"
 	kapisnetworking "k8s.io/api/networking/v1"
 	"k8s.io/client-go/kubernetes"
@@ -113,8 +115,16 @@ func (oc *Controller) Run() error {
 		oc.portGroupSupport = true
 	}
 
-	for _, f := range []func() error{oc.WatchPods, oc.WatchServices, oc.WatchEndpoints, oc.WatchNamespaces,
-		oc.WatchNetworkPolicy, oc.WatchNodes} {
+	fs := make([]func() error, 0)
+	fs = append(fs, oc.WatchPods)
+	//fs = append(fs, oc.WatchDeployments)
+	//fs = append(fs, oc.WatchServices)
+	//fs = append(fs, oc.WatchEndpoints)
+	//fs = append(fs, oc.WatchNamespaces)
+	//fs = append(fs, oc.WatchNetworkPolicy)
+	//fs = append(fs, oc.WatchNodes)
+
+	for _, f := range fs {
 		if err := f(); err != nil {
 			return err
 		}
@@ -128,19 +138,35 @@ func (oc *Controller) WatchPods() error {
 		AddFunc: func(obj interface{}) {
 			pod := obj.(*kapi.Pod)
 			if pod.Spec.NodeName != "" {
-				oc.addLogicalPort(pod)
+				oc.addPod(pod)
+				//oc.addLogicalPort(pod)
 			}
 		},
 		UpdateFunc: func(old, newer interface{}) {
+			//podOld := old.(*kapi.Pod)
 			podNew := newer.(*kapi.Pod)
-			podOld := old.(*kapi.Pod)
-			if podOld.Spec.NodeName == "" && podNew.Spec.NodeName != "" {
-				oc.addLogicalPort(podNew)
+			//if podOld.Name != "" && podNew.Name != "" {
+			//	oc.updatePod(podOld, podNew)
+			//}
+
+			annotations, err := oc.kube.GetAnnotationsOnPod(podNew.Namespace, podNew.Name)
+			if err != nil {
+				return
 			}
+			_, ipOk := annotations[values.IPAddressStatic]
+			_, macOk := annotations[values.MacAddressStatic]
+			_, gatewayOk := annotations[values.PodGatewayIP]
+			if !ipOk || !macOk || !gatewayOk {
+				oc.addPod(podNew)
+			}
+			//if podOld.Spec.NodeName == "" && podNew.Spec.NodeName != "" {
+			//	oc.addLogicalPort(podNew)
+			//}
 		},
 		DeleteFunc: func(obj interface{}) {
 			pod := obj.(*kapi.Pod)
-			oc.deleteLogicalPort(pod)
+			oc.deletePod(pod)
+			//oc.deleteLogicalPort(pod)
 		},
 	}, oc.syncPods)
 	return err
@@ -265,5 +291,29 @@ func (oc *Controller) WatchNodes() error {
 			oc.lsMutex.Unlock()
 		},
 	}, nil)
+	return err
+}
+
+// WatchDeployments starts the watching of deployment resource and calls
+// back the appropriate handler logic
+func (oc *Controller) WatchDeployments() error {
+	_, err := oc.watchFactory.AdddeploymentHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			deployment := obj.(*kapps.Deployment)
+			oc.AddDeployment(deployment)
+			return
+		},
+		UpdateFunc: func(old, newer interface{}) {
+			oldDeployment := old.(*kapps.Deployment)
+			newDeployment := newer.(*kapps.Deployment)
+			oc.UpdateDeployment(oldDeployment, newDeployment)
+			return
+		},
+		DeleteFunc: func(obj interface{}) {
+			deployment := obj.(*kapps.Deployment)
+			oc.DeleteDeployment(deployment)
+			return
+		},
+	}, oc.syncDeployments)
 	return err
 }

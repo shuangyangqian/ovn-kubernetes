@@ -5,6 +5,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	kapps "k8s.io/api/apps/v1"
 	kapi "k8s.io/api/core/v1"
 	kapisnetworking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,12 +17,15 @@ import (
 // Interface represents the exported methods for dealing with getting/setting
 // kubernetes resources
 type Interface interface {
-	SetAnnotationOnPod(pod *kapi.Pod, key, value string) error
+	SetAnnotationOnPod(pod *kapi.Pod, key, value string) (*kapi.Pod, error)
 	SetAnnotationOnNode(node *kapi.Node, key, value string) error
 	SetAnnotationOnNamespace(ns *kapi.Namespace, key, value string) error
+	SetAnnotationOnDeployment(deployment *kapps.Deployment, key, value string) error
 	GetAnnotationsOnPod(namespace, name string) (map[string]string, error)
+	GetAnnotationsOnDeployment(namespace, name string) (map[string]string, error)
 	GetPod(namespace, name string) (*kapi.Pod, error)
 	GetPods(namespace string) (*kapi.PodList, error)
+	GetDeployment(namespace, name string) (*kapps.Deployment, error)
 	GetPodsByLabels(namespace string, selector labels.Selector) (*kapi.PodList, error)
 	GetNodes() (*kapi.NodeList, error)
 	GetNode(name string) (*kapi.Node, error)
@@ -38,14 +42,14 @@ type Kube struct {
 }
 
 // SetAnnotationOnPod takes the pod object and key/value string pair to set it as an annotation
-func (k *Kube) SetAnnotationOnPod(pod *kapi.Pod, key, value string) error {
+func (k *Kube) SetAnnotationOnPod(pod *kapi.Pod, key, value string) (*kapi.Pod, error) {
 	logrus.Infof("Setting annotations %s=%s on pod %s", key, value, pod.Name)
 	patchData := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, key, value)
-	_, err := k.KClient.Core().Pods(pod.Namespace).Patch(pod.Name, types.MergePatchType, []byte(patchData))
+	pod, err := k.KClient.Core().Pods(pod.Namespace).Patch(pod.Name, types.MergePatchType, []byte(patchData))
 	if err != nil {
 		logrus.Errorf("Error in setting annotation on pod %s/%s: %v", pod.Name, pod.Namespace, err)
 	}
-	return err
+	return pod, err
 }
 
 // SetAnnotationOnNode takes the node object and key/value string pair to set it as an annotation
@@ -76,6 +80,22 @@ func (k *Kube) SetAnnotationOnNamespace(ns *kapi.Namespace, key,
 	return err
 }
 
+// SetAnnotationOnNamespace takes the Namespace object and key/value pair
+// to set it as an annotation
+func (k *Kube) SetAnnotationOnDeployment(deployment *kapps.Deployment, key, value string) error {
+	logrus.Infof("Setting annotations %s=%s on deployment %s", key, value,
+		deployment.Name)
+	patchData := fmt.Sprintf(`{"metadata":{"annotations":{"%s":"%s"}}}`, key,
+		value)
+	_, err := k.KClient.AppsV1().Deployments(deployment.Namespace).Patch(deployment.Name,
+		types.MergePatchType, []byte(patchData))
+	if err != nil {
+		logrus.Errorf("Error in setting annotation on namespace %s: %v",
+			deployment.Name, err)
+	}
+	return err
+}
+
 // GetAnnotationsOnPod obtains the pod annotations from kubernetes apiserver, given the name and namespace
 func (k *Kube) GetAnnotationsOnPod(namespace, name string) (map[string]string, error) {
 	pod, err := k.KClient.Core().Pods(namespace).Get(name, metav1.GetOptions{})
@@ -85,9 +105,21 @@ func (k *Kube) GetAnnotationsOnPod(namespace, name string) (map[string]string, e
 	return pod.ObjectMeta.Annotations, nil
 }
 
+func (k *Kube) GetAnnotationsOnDeployment(namespace, name string) (map[string]string, error) {
+	deployment, err := k.KClient.AppsV1().Deployments(namespace).Get(name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return deployment.Annotations, nil
+}
+
 // GetPod obtains the Pod resource from kubernetes apiserver, given the name and namespace
 func (k *Kube) GetPod(namespace, name string) (*kapi.Pod, error) {
 	return k.KClient.Core().Pods(namespace).Get(name, metav1.GetOptions{})
+}
+
+func (k *Kube) GetDeployment(namespace, name string) (*kapps.Deployment, error) {
+	return k.KClient.AppsV1().Deployments(namespace).Get(name, metav1.GetOptions{})
 }
 
 // GetPods obtains the Pod resource from kubernetes apiserver, given the name and namespace

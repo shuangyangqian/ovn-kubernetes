@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/ipam"
 	"io"
 	"io/ioutil"
 	"net"
@@ -21,7 +22,7 @@ import (
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/ovn"
-	util "github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
 
 	kexec "k8s.io/utils/exec"
 )
@@ -88,7 +89,7 @@ func main() {
 	cli.HelpPrinterCustom = printOvnKubeHelp
 	c := cli.NewApp()
 	c.Name = "ovnkube"
-	c.Usage = "run ovnkube to start master, node, and gateway services"
+	c.Usage = "run ovnkube to start master, node "
 	c.Version = config.Version
 	c.CustomAppHelpTemplate = CustomAppHelpTemplate
 	c.Flags = config.CommonFlags
@@ -194,30 +195,23 @@ func runOvnKube(ctx *cli.Context) error {
 	clusterController := ovncluster.NewClusterController(clientset, factory)
 
 	if master != "" || node != "" {
-		clusterController.GatewayInit = ctx.Bool("init-gateways")
-		clusterController.GatewayIntf = ctx.String("gateway-interface")
-		clusterController.GatewayNextHop = ctx.String("gateway-nexthop")
-		clusterController.GatewaySpareIntf = ctx.Bool("gateway-spare-interface")
-		clusterController.LocalnetGateway = ctx.Bool("gateway-local")
-		clusterController.GatewayVLANID = ctx.Uint("gateway-vlanid")
-		clusterController.OvnHA = ctx.Bool("ha")
+		clusterController.GatewayIP = ctx.String("gateway-ip")
+		logrus.Debugf("get the subnet gateway id %s", clusterController.GatewayIP)
 
+		// when cluster-subnet from params is "10.212.0.0/21"
+		// the ClusterIPNet is {"10.212.0.0/21 24"}
 		clusterController.ClusterIPNet, err = parseClusterSubnetEntries(ctx.String("cluster-subnet"))
 		if err != nil {
 			panic(err.Error())
 		}
-
-		clusterServicesSubnet := ctx.String("service-cluster-ip-range")
-		if clusterServicesSubnet != "" {
-			var servicesSubnet *net.IPNet
-			_, servicesSubnet, err = net.ParseCIDR(
-				clusterServicesSubnet)
-			if err != nil {
-				panic(err.Error())
-			}
-			clusterController.ClusterServicesSubnet = servicesSubnet.String()
+		// assume that the subnet is only one, eg:10.233.0.0/26
+		subnetString := strings.Split(ctx.String("cluster-subnet"), "/")
+		mask, err := strconv.Atoi(subnetString[1])
+		if err != nil {
+			panic(err)
 		}
-		clusterController.NodePortEnable = nodePortEnable
+		clusterController.Mask = mask
+		clusterController.MTU = ipam.DefaultMTU
 
 		if master != "" {
 			if runtime.GOOS == "windows" {
@@ -232,10 +226,6 @@ func runOvnKube(ctx *cli.Context) error {
 		}
 
 		if node != "" {
-			if config.Kubernetes.Token == "" {
-				panic("Cannot initialize node without service account 'token'. Please provide one with --k8s-token argument")
-			}
-
 			err := clusterController.StartClusterNode(node)
 			if err != nil {
 				logrus.Errorf(err.Error())
@@ -243,15 +233,17 @@ func runOvnKube(ctx *cli.Context) error {
 			}
 		}
 	}
+	// the netController come from params net-controller
+	// only master should add this params, node doesn't need
 	if netController {
 		ovnController := ovn.NewOvnController(clientset, factory, nodePortEnable)
-		if clusterController.OvnHA {
-			err := clusterController.RebuildOVNDatabase(master, ovnController)
-			if err != nil {
-				logrus.Errorf(err.Error())
-				panic(err.Error())
-			}
-		}
+		//if clusterController.OvnHA {
+		//	err := clusterController.RebuildOVNDatabase(master, ovnController)
+		//	if err != nil {
+		//		logrus.Errorf(err.Error())
+		//		panic(err.Error())
+		//	}
+		//}
 		if err := ovnController.Run(); err != nil {
 			logrus.Errorf(err.Error())
 			panic(err.Error())

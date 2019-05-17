@@ -7,14 +7,11 @@ import (
 
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/cni"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/ovn"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
 
 	kapi "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
-
-const LogicSwitchPrefix = "k8s"
 
 // StartClusterNode learns the subnet assigned to it by the master controller
 // and calls the SetupNode script which establishes the logical switch
@@ -67,14 +64,6 @@ func (cluster *OvnClusterController) updateOvnNode(masterIP string,
 
 	for _, clusterSubnet := range cluster.ClusterIPNet {
 		clusterSubnets = append(clusterSubnets, clusterSubnet.CIDR.String())
-	}
-
-	// Recreate logical switch and management port for this node
-	err = ovn.CreateManagementPort(node.Name, subnet,
-		cluster.ClusterServicesSubnet,
-		clusterSubnets)
-	if err != nil {
-		return err
 	}
 
 	return nil

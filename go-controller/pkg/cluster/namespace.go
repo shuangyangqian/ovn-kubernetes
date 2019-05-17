@@ -2,7 +2,6 @@ package cluster
 
 import (
 	"fmt"
-	"github.com/openshift/origin/pkg/util/netutils"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/values"
 	"github.com/sirupsen/logrus"
@@ -59,7 +58,7 @@ func (c *OvnClusterController) syncNamespaces(namespaces []interface{}) {
 func (c *OvnClusterController) addNamespace(namespace *kapi.Namespace) (err error) {
 
 	var namespaceSubnet *net.IPNet
-	var subnetAllocator *netutils.SubnetAllocator
+	var subnetAllocator *SubnetAllocator
 	namespaceSubnet, subnetAllocator, err = c.ensureNamespaceSubnet(namespace)
 	if err != nil {
 		return err
@@ -87,7 +86,7 @@ func (c *OvnClusterController) addNamespace(namespace *kapi.Namespace) (err erro
 	return nil
 }
 
-func (c *OvnClusterController) ensureNamespaceSubnet(namespace *kapi.Namespace) (*net.IPNet, *netutils.SubnetAllocator, error) {
+func (c *OvnClusterController) ensureNamespaceSubnet(namespace *kapi.Namespace) (*net.IPNet, *SubnetAllocator, error) {
 	// Do not create a subnet if the node already has a subnet
 	subnet, _ := parseNamespaceSubnet(namespace)
 	if subnet != nil {
@@ -97,7 +96,7 @@ func (c *OvnClusterController) ensureNamespaceSubnet(namespace *kapi.Namespace) 
 	// Create new subnet
 	for _, possibleSubnet := range c.masterSubnetAllocatorList {
 		sn, err := possibleSubnet.GetNetwork()
-		if err == netutils.ErrSubnetAllocatorFull {
+		if err == ErrSubnetAllocatorFull {
 			// Current subnet exhausted, check next possible subnet
 			continue
 		} else if err != nil {

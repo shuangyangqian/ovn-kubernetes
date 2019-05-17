@@ -3,9 +3,9 @@ package cluster
 import (
 	"fmt"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
+	"k8s.io/klog/glog"
 	"net"
 
-	"github.com/openshift/origin/pkg/util/netutils"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/kube"
@@ -16,7 +16,7 @@ import (
 type OvnClusterController struct {
 	Kube                      kube.Interface
 	watchFactory              *factory.WatchFactory
-	masterSubnetAllocatorList []*netutils.SubnetAllocator
+	masterSubnetAllocatorList []*SubnetAllocator
 
 	TCPLoadBalancerUUID string
 	UDPLoadBalancerUUID string
@@ -69,7 +69,7 @@ func setupOVNNode(nodeName string) error {
 	var err error
 	nodeIP := config.Default.EncapIP
 	if nodeIP == "" {
-		nodeIP, err = netutils.GetNodeIP(nodeName)
+		nodeIP, err = GetNodeIP(nodeName)
 		if err != nil {
 			return fmt.Errorf("failed to obtain local IP from hostname %q: %v", nodeName, err)
 		}
@@ -103,4 +103,49 @@ func setupOVNMaster(nodeName string) error {
 		}
 	}
 	return nil
+}
+func GetNodeIP(nodeName string) (string, error) {
+	ip := net.ParseIP(nodeName)
+	if ip == nil {
+		addrs, err := net.LookupIP(nodeName)
+		if err != nil {
+			return "", fmt.Errorf("Failed to lookup IP address for node %s: %v", nodeName, err)
+		}
+		for _, addr := range addrs {
+			// Skip loopback and non IPv4 addrs
+			if addr.IsLoopback() || addr.To4() == nil {
+				glog.V(5).Infof("Skipping loopback/non-IPv4 addr: %q for node %s", addr.String(), nodeName)
+				continue
+			}
+			ip = addr
+			break
+		}
+	} else if ip.IsLoopback() || ip.To4() == nil {
+		glog.V(5).Infof("Skipping loopback/non-IPv4 addr: %q for node %s", ip.String(), nodeName)
+		ip = nil
+	}
+
+	if ip == nil || len(ip.String()) == 0 {
+		return "", fmt.Errorf("Failed to obtain IP address from node name: %s", nodeName)
+	}
+	return ip.String(), nil
+}
+
+// ParseCIDRMask parses a CIDR string and ensures that it has no bits set beyond the
+// network mask length. Use this when the input is supposed to be either a description of
+// a subnet (eg, "192.168.1.0/24", meaning "192.168.1.0 to 192.168.1.255"), or a mask for
+// matching against (eg, "192.168.1.15/32", meaning "must match all 32 bits of the address
+// "192.168.1.15"). Use net.ParseCIDR() when the input is a host address that also
+// describes the subnet that it is on (eg, "192.168.1.15/24", meaning "the address
+// 192.168.1.15 on the network 192.168.1.0/24").
+func ParseCIDRMask(cidr string) (*net.IPNet, error) {
+	ip, net, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, err
+	}
+	if !ip.Equal(net.IP) {
+		maskLen, addrLen := net.Mask.Size()
+		return nil, fmt.Errorf("CIDR network specification %q is not in canonical form (should be %s/%d or %s/%d?)", cidr, ip.Mask(net.Mask).String(), maskLen, ip.String(), addrLen)
+	}
+	return net, nil
 }

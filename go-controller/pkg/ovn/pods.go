@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/values"
 	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/client-go/tools/cache"
 	"strings"
 	"time"
 
@@ -58,20 +59,24 @@ func (oc *Controller) syncPods(pods []interface{}) {
 	}
 }
 
-func (oc *Controller) addPod(pod *kapi.Pod) {
-	if pod.Spec.HostNetwork {
-		return
+func (oc *Controller) addPod(key string) error {
+
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
+	if err != nil {
+		return err
+	}
+	pod, err := oc.podsLister.Pods(namespace).Get(name)
+	if err != nil {
+		return err
 	}
 	//check whether open ip static switch, if not, add lsp directly and return
-	namespace := pod.Namespace
-	name := pod.Name
 	labels := pod.Labels
 	// todo check this pod's controller
 	// now just assume that it's controlled by deployment which versions is apps/v1
 	deployment, err := oc.kube.GetDeployment(namespace, labels["app"])
 	if err != nil {
 		logrus.Error(fmt.Errorf("err:%s when get deployment with name:%s-%s", err, namespace, labels["app"]))
-		return
+		return err
 	}
 	_, isStaticIP := deployment.Annotations[values.DeploymentStaticIPSwitch]
 	if !isStaticIP {
@@ -79,7 +84,7 @@ func (oc *Controller) addPod(pod *kapi.Pod) {
 		if err != nil {
 			logrus.Errorf("err:%s when create lsp for pod:%s_%s", err, namespace, name)
 		}
-		return
+		return err
 	}
 
 	ipPool, isStaticIPool := deployment.Annotations[values.IPPoolStatic]
@@ -123,20 +128,20 @@ func (oc *Controller) addPod(pod *kapi.Pod) {
 					if err != nil {
 						logrus.Error(fmt.Errorf("err:%s when delete lsp with ip:%s", err,
 							pod.Annotations[values.DeploymentStaticIPSwitch]))
-						return
+						return err
 					}
 					err := oc.AddLogicalPortWithIPAndMac(pod, "", ip, mac)
 					if err != nil {
 						logrus.Error(fmt.Errorf("err:%s when create lsp for pod:%s", err, name))
-						return
+						return err
 					}
 					err = oc.patchPod(pod, ip, mac)
 					if err != nil {
 						logrus.Error(fmt.Errorf("err:%s when patch pod :%s", err, name))
-						return
+						return err
 					}
 					isBreak = true
-					return
+					return nil
 				}
 				if isBreak {
 					break
@@ -149,7 +154,7 @@ func (oc *Controller) addPod(pod *kapi.Pod) {
 	newPod, err := oc.addLogicalPort(pod)
 	if err != nil {
 		logrus.Errorf("err:%s when create lsp for pod:%s_%s", err, namespace, name)
-		return
+		return err
 	}
 	newIPAndMac := fmt.Sprintf("%s %s", newPod.Annotations[values.IPAddressStatic],
 		newPod.Annotations[values.MacAddressStatic])
@@ -165,23 +170,35 @@ func (oc *Controller) addPod(pod *kapi.Pod) {
 	if err != nil {
 		logrus.Errorf("err %s when set annnotations:%s on deployment:%s", err, newAnnotations,
 			deployment.Name)
-		return
+		return err
 	}
-	return
+	return err
 }
 
-func (oc *Controller) updatePod(podOld, podNew *kapi.Pod) {
-	// do nothing
-	logrus.Debugf("pod %s update to %s", podOld.Name, podNew.Name)
+func (oc *Controller) updatePod(key string) error {
+
+	namespace, name, _ := cache.SplitMetaNamespaceKey(key)
+	pod, err := oc.podsLister.Pods(namespace).Get(name)
+	if err != nil {
+		return err
+	}
+
+	if pod.Annotations[values.IPAddressStatic] == "" {
+		return oc.addPod(key)
+	}
+
+	return nil
 }
 
-func (oc *Controller) deletePod(pod *kapi.Pod) {
+func (oc *Controller) deletePod(key string) error {
+
+	namespace, name, err := cache.SplitMetaNamespaceKey(key)
+	pod, err := oc.podsLister.Pods(namespace).Get(name)
+
 	logrus.Debug("deleting pod:%s", pod.Name)
 	if pod.Spec.HostNetwork {
-		return
+		return nil
 	}
-	namespace := pod.Namespace
-	name := pod.Name
 
 	// get the pod's deloyment to check whether the deployment is update or scroll down
 	deployment, err := oc.kube.GetDeployment(namespace, pod.Labels["app"])
@@ -197,7 +214,7 @@ func (oc *Controller) deletePod(pod *kapi.Pod) {
 			}
 
 		}
-		return
+		return err
 	}
 	ipSwitch, isStaticIP := deployment.Annotations[values.DeploymentStaticIPSwitch]
 	if !isStaticIP {
@@ -207,7 +224,7 @@ func (oc *Controller) deletePod(pod *kapi.Pod) {
 		if err != nil {
 			logrus.Errorf("err:%s when delete lsp for pod:%s_%s", err, namespace, name)
 		}
-		return
+		return err
 	}
 	logrus.Debugf("deployment:%s open ip static switch with %s", deployment.Name, ipSwitch)
 
@@ -216,7 +233,7 @@ func (oc *Controller) deletePod(pod *kapi.Pod) {
 	err = oc.deleteLogicalPort(pod)
 	if err != nil {
 		logrus.Errorf("err:%s when create lsp for pod:%s_%s", err, namespace, name)
-		return
+		return err
 	}
 
 	number := int(*deployment.Spec.Replicas)
@@ -224,17 +241,17 @@ func (oc *Controller) deletePod(pod *kapi.Pod) {
 		logrus.Debugf("get replicas is zero with deployment:%s", pod.Labels["app"])
 		// we should delete pn frpm deployment's annotations ipPool
 		// todo delete pn from deployment annotations
-		return
+		return nil
 	}
 	ipPool, ipStaticPool := deployment.Annotations[values.IPPoolStatic]
 	if !ipStaticPool {
 		logrus.Errorf("cannot get ipPool info for deployment:%s", deployment)
-		return
+		return nil
 	}
 	pns, err := IpPoolToPodSubnet(ipPool)
 	if err != nil {
 		logrus.Errorf("cannot convert ipPool:%s to pns", ipPool)
-		return
+		return err
 	}
 	logrus.Debugf("convert ipPool to pns successfully:%s ---> %d pns", ipPool, len(pns))
 	logrus.Debugf("now we should check len(pns):%s and number(replicas):%d", len(pns), number)
@@ -249,9 +266,9 @@ func (oc *Controller) deletePod(pod *kapi.Pod) {
 		err := oc.kube.SetAnnotationOnDeployment(deployment, values.IPPoolStatic, podNetworkString(newPns))
 		if err != nil {
 			logrus.Errorf("err:%s when set annotations for deployment:%s", podNetworkString(newPns), deployment.Name)
-			return
+			return err
 		}
-		return
+		return nil
 	}
 
 	// means deployment update
@@ -261,9 +278,9 @@ func (oc *Controller) deletePod(pod *kapi.Pod) {
 			pod.Annotations[values.MacAddressStatic])
 		if err != nil {
 			logrus.Errorf("err:%s when create lsp for pod:%s", err, namespace, fakePort)
-			return
+			return err
 		}
-		return
+		return nil
 	}
 
 	// means scroll down
@@ -278,11 +295,11 @@ func (oc *Controller) deletePod(pod *kapi.Pod) {
 		err := oc.kube.SetAnnotationOnDeployment(deployment, values.IPPoolStatic, podNetworkString(newPns))
 		if err != nil {
 			logrus.Errorf("err:%s when set annotations for deployment:%s", podNetworkString(newPns), deployment.Name)
-			return
+			return err
 		}
 	}
 
-	return
+	return nil
 }
 
 func (oc *Controller) deletePodAcls(logicalPort string) {
@@ -331,9 +348,6 @@ func (oc *Controller) deletePodAcls(logicalPort string) {
 }
 
 func (oc *Controller) getLogicalPortUUID(logicalPort string) string {
-	if oc.logicalPortUUIDCache[logicalPort] != "" {
-		return oc.logicalPortUUIDCache[logicalPort]
-	}
 
 	out, stderr, err := util.RunOVNNbctl("--if-exists", "get",
 		"logical_switch_port", logicalPort, "_uuid")
@@ -343,35 +357,26 @@ func (oc *Controller) getLogicalPortUUID(logicalPort string) string {
 		return ""
 	}
 
-	if out == "" {
-		return out
-	}
-
-	oc.logicalPortUUIDCache[logicalPort] = out
-	return oc.logicalPortUUIDCache[logicalPort]
+	return out
 }
 
 func (oc *Controller) getGatewayFromSwitch(logicalSwitch string) (string, string, error) {
 	var gatewayIPMaskStr, stderr string
-	var ok bool
 	var err error
 
 	oc.lsMutex.Lock()
 	defer oc.lsMutex.Unlock()
-	if gatewayIPMaskStr, ok = oc.gatewayCache[logicalSwitch]; !ok {
-		gatewayIPMaskStr, stderr, err = util.RunOVNNbctl("--if-exists",
-			"get", "logical_switch", logicalSwitch,
-			"external_ids:gateway_ip")
-		if err != nil {
-			logrus.Errorf("Failed to get gateway IP:  %s, stderr: %q, %v",
-				gatewayIPMaskStr, stderr, err)
-			return "", "", err
-		}
-		if gatewayIPMaskStr == "" {
-			return "", "", fmt.Errorf("Empty gateway IP in logical switch %s",
-				logicalSwitch)
-		}
-		oc.gatewayCache[logicalSwitch] = gatewayIPMaskStr
+	gatewayIPMaskStr, stderr, err = util.RunOVNNbctl("--if-exists",
+		"get", "logical_switch", logicalSwitch,
+		"external_ids:gateway_ip")
+	if err != nil {
+		logrus.Errorf("Failed to get gateway IP:  %s, stderr: %q, %v",
+			gatewayIPMaskStr, stderr, err)
+		return "", "", err
+	}
+	if gatewayIPMaskStr == "" {
+		return "", "", fmt.Errorf("Empty gateway IP in logical switch %s",
+			logicalSwitch)
 	}
 	gatewayIPMask := strings.Split(gatewayIPMaskStr, "/")
 	gatewayIP := gatewayIPMask[0]
@@ -393,12 +398,9 @@ func (oc *Controller) deleteLogicalPort(pod *kapi.Pod) error {
 	}
 	//ipAddress := oc.getIPFromOvnAnnotation(pod.Annotations["ovn"])
 
-	delete(oc.logicalPortCache, logicalPort)
-
 	oc.lspMutex.Lock()
 	delete(oc.lspIngressDenyCache, logicalPort)
 	delete(oc.lspEgressDenyCache, logicalPort)
-	delete(oc.logicalPortUUIDCache, logicalPort)
 	oc.lspMutex.Unlock()
 
 	// just comments this, if we need it later, to search it more
@@ -413,13 +415,6 @@ func (oc *Controller) deleteLogicalPort(pod *kapi.Pod) error {
 }
 
 func (oc *Controller) waitForNamespaceLogicalSwitch(namespaceName string) error {
-	oc.lsMutex.Lock()
-	ok := oc.logicalSwitchCache[namespaceName]
-	oc.lsMutex.Unlock()
-	// Fast return if we already have the node switch in our cache
-	if ok {
-		return nil
-	}
 
 	// Otherwise wait for the node logical switch to be created by the ClusterController.
 	// The node switch will be created very soon after startup so we should
@@ -434,18 +429,11 @@ func (oc *Controller) waitForNamespaceLogicalSwitch(namespaceName string) error 
 		return err
 	}
 
-	oc.lsMutex.Lock()
-	defer oc.lsMutex.Unlock()
-	if !oc.logicalSwitchCache[namespaceName] {
-		//if err := oc.addAllowACLFromNode(namespaceName); err != nil {
-		//	return err
-		//}
-		oc.logicalSwitchCache[namespaceName] = true
-	}
 	return nil
 }
 
 func (oc *Controller) addLogicalPort(pod *kapi.Pod) (*kapi.Pod, error) {
+
 	portName := fmt.Sprintf("%s_%s", pod.Namespace, pod.Name)
 	out, stderr, err := util.RunOVNNbctl("--wait=sb", "--",
 		"--may-exist", "lsp-add", pod.Namespace, portName,

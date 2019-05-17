@@ -1,61 +1,33 @@
 package ovn
 
 import (
-	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/factory"
+	"fmt"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/kube"
-	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/values"
 	"github.com/sirupsen/logrus"
-	kapps "k8s.io/api/apps/v1"
 	kapi "k8s.io/api/core/v1"
-	kapisnetworking "k8s.io/api/networking/v1"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	listerV1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
-	"reflect"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
+	"k8s.io/klog"
 	"sync"
+	"time"
 )
 
 // Controller structure is the object which holds the controls for starting
 // and reacting upon the watched resources (e.g. pods, endpoints)
 type Controller struct {
-	kube           kube.Interface
-	nodePortEnable bool
-	watchFactory   *factory.WatchFactory
-
-	gatewayCache map[string]string
-	// For TCP and UDP type traffic, cache OVN load-balancers used for the
-	// cluster's east-west traffic.
-	loadbalancerClusterCache map[string]string
-
-	// For TCP and UDP type traffice, cache OVN load balancer that exists on the
-	// default gateway
-	loadbalancerGWCache map[string]string
-
-	// A cache of all logical switches seen by the watcher
-	logicalSwitchCache map[string]bool
-
-	// A cache of all logical ports seen by the watcher and
-	// its corresponding logical switch
-	logicalPortCache map[string]string
-
-	// A cache of all logical ports and its corresponding uuids.
-	logicalPortUUIDCache map[string]string
-
-	// For each namespace, an address_set that has all the pod IP
-	// address in that namespace
-	namespaceAddressSet map[string]map[string]bool
-
-	// For each namespace, a lock to protect critical regions
-	namespaceMutex map[string]*sync.Mutex
-
-	// For each namespace, a map of policy name to 'namespacePolicy'.
-	namespacePolicies map[string]map[string]*namespacePolicy
-
-	// Port group for ingress deny rule
-	portGroupIngressDeny string
-
-	// Port group for egress deny rule
-	portGroupEgressDeny string
+	kube            kube.Interface
+	nodePortEnable  bool
+	informerFactory informers.SharedInformerFactory
 
 	// For each logical port, the number of network policies that want
 	// to add a ingress deny rule.
@@ -74,6 +46,17 @@ type Controller struct {
 
 	// supports port_group?
 	portGroupSupport bool
+
+	// =============
+	recorder record.EventRecorder
+
+	podsLister     listerV1.PodLister
+	podsSynced     cache.InformerSynced
+	addPodQueue    workqueue.RateLimitingInterface
+	deletePodQueue workqueue.RateLimitingInterface
+	updatePodQueue workqueue.RateLimitingInterface
+
+	elector *leaderelection.LeaderElector
 }
 
 const (
@@ -82,238 +65,306 @@ const (
 
 	// UDP is the constant string for the string "UDP"
 	UDP = "UDP"
+
+	controllerAgentName = "ovn-controller"
 )
 
 // NewOvnController creates a new OVN controller for creating logical network
 // infrastructure and policy
-func NewOvnController(kubeClient kubernetes.Interface, wf *factory.WatchFactory, nodePortEnable bool) *Controller {
-	return &Controller{
-		kube:                     &kube.Kube{KClient: kubeClient},
-		watchFactory:             wf,
-		logicalSwitchCache:       make(map[string]bool),
-		logicalPortCache:         make(map[string]string),
-		logicalPortUUIDCache:     make(map[string]string),
-		namespaceAddressSet:      make(map[string]map[string]bool),
-		namespacePolicies:        make(map[string]map[string]*namespacePolicy),
-		namespaceMutex:           make(map[string]*sync.Mutex),
-		lspIngressDenyCache:      make(map[string]int),
-		lspEgressDenyCache:       make(map[string]int),
-		lspMutex:                 &sync.Mutex{},
-		lsMutex:                  &sync.Mutex{},
-		gatewayCache:             make(map[string]string),
-		loadbalancerClusterCache: make(map[string]string),
-		loadbalancerGWCache:      make(map[string]string),
-		nodePortEnable:           nodePortEnable,
+func NewOvnController(kubeClient kubernetes.Interface, nodePortEnable bool) *Controller {
+	utilruntime.Must(scheme.AddToScheme(scheme.Scheme))
+	klog.V(4).Info("Creating event broadcaster")
+	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster.StartLogging(klog.Infof)
+	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: kubeClient.CoreV1().Events("")})
+	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, kapi.EventSource{Component: controllerAgentName})
+
+	informerFactory := informers.NewSharedInformerFactory(kubeClient, time.Second*30)
+
+	podInformer := informerFactory.Core().V1().Pods()
+
+	controller := &Controller{
+		kube:           &kube.Kube{KClient: kubeClient},
+		nodePortEnable: nodePortEnable,
+
+		podsLister:     podInformer.Lister(),
+		podsSynced:     podInformer.Informer().HasSynced,
+		addPodQueue:    workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "AddPod"),
+		deletePodQueue: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "DeletePod"),
+		updatePodQueue: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "UpdatePod"),
+
+		informerFactory: informerFactory,
+
+		recorder: recorder,
 	}
+
+	podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    controller.enqueueAddPod,
+		DeleteFunc: controller.enqueueDeletePod,
+		UpdateFunc: controller.enqueueUpdatePod,
+	})
+
+	return controller
 }
 
 // Run starts the actual watching. Also initializes any local structures needed.
-func (oc *Controller) Run() error {
-	_, _, err := util.RunOVNNbctl("--columns=_uuid", "list",
-		"port_group")
-	if err == nil {
-		oc.portGroupSupport = true
+func (oc *Controller) Run(stopChan <-chan struct{}) error {
+
+	defer utilruntime.HandleCrash()
+
+	defer oc.addPodQueue.ShutDown()
+	defer oc.deletePodQueue.ShutDown()
+	defer oc.updatePodQueue.ShutDown()
+
+	logrus.Debugf("Starting ovn controller")
+
+	oc.informerFactory.Start(stopChan)
+
+	// Wait for the caches to be synced before starting workers
+	logrus.Info("Waiting for informer caches to sync")
+	if ok := cache.WaitForCacheSync(stopChan, oc.podsSynced); !ok {
+		return fmt.Errorf("failed to wait for caches to sync")
 	}
 
-	fs := make([]func() error, 0)
-	fs = append(fs, oc.WatchPods)
-	//fs = append(fs, oc.WatchDeployments)
-	//fs = append(fs, oc.WatchServices)
-	//fs = append(fs, oc.WatchEndpoints)
-	//fs = append(fs, oc.WatchNamespaces)
-	//fs = append(fs, oc.WatchNetworkPolicy)
-	//fs = append(fs, oc.WatchNodes)
+	klog.Info("Starting workers")
+	for i := 0; i < 10; i++ {
+		go wait.Until(oc.runAddPodWorker, time.Second, stopChan)
+		go wait.Until(oc.runDeletePodWorker, time.Second, stopChan)
+		go wait.Until(oc.runUpdatePodWorker, time.Second, stopChan)
 
-	for _, f := range fs {
-		if err := f(); err != nil {
-			return err
-		}
 	}
+
+	klog.Info("Started workers")
+	<-stopChan
+	klog.Info("Shutting down workers")
+
 	return nil
 }
 
-// WatchPods starts the watching of Pod resource and calls back the appropriate handler logic
-func (oc *Controller) WatchPods() error {
-	_, err := oc.watchFactory.AddPodHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			pod := obj.(*kapi.Pod)
-			if pod.Spec.NodeName != "" {
-				oc.addPod(pod)
-				//oc.addLogicalPort(pod)
-			}
-		},
-		UpdateFunc: func(old, newer interface{}) {
-			//podOld := old.(*kapi.Pod)
-			podNew := newer.(*kapi.Pod)
-			//if podOld.Name != "" && podNew.Name != "" {
-			//	oc.updatePod(podOld, podNew)
-			//}
+func (c *Controller) enqueueAddPod(obj interface{}) {
+	pod := obj.(*kapi.Pod)
+	if pod.Annotations[values.IPAddressStatic] != "" {
+		return
+	}
+	if pod.Spec.HostNetwork {
+		return
+	}
 
-			annotations, err := oc.kube.GetAnnotationsOnPod(podNew.Namespace, podNew.Name)
-			if err != nil {
-				return
-			}
-			_, ipOk := annotations[values.IPAddressStatic]
-			_, macOk := annotations[values.MacAddressStatic]
-			_, gatewayOk := annotations[values.PodGatewayIP]
-			if !ipOk || !macOk || !gatewayOk {
-				oc.addPod(podNew)
-			}
-			//if podOld.Spec.NodeName == "" && podNew.Spec.NodeName != "" {
-			//	oc.addLogicalPort(podNew)
-			//}
-		},
-		DeleteFunc: func(obj interface{}) {
-			pod := obj.(*kapi.Pod)
-			oc.deletePod(pod)
-			//oc.deleteLogicalPort(pod)
-		},
-	}, oc.syncPods)
-	return err
+	var key string
+	var err error
+	if key, err = cache.MetaNamespaceKeyFunc(obj); err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+
+	klog.V(3).Infof("enqueue add pod %s", key)
+	c.addPodQueue.AddRateLimited(key)
 }
 
-// WatchServices starts the watching of Service resource and calls back the
-// appropriate handler logic
-func (oc *Controller) WatchServices() error {
-	_, err := oc.watchFactory.AddServiceHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj interface{}) {},
-		UpdateFunc: func(old, new interface{}) {},
-		DeleteFunc: func(obj interface{}) {
-			service := obj.(*kapi.Service)
-			oc.deleteService(service)
-		},
-	}, oc.syncServices)
-	return err
+func (c *Controller) enqueueDeletePod(obj interface{}) {
+	pod := obj.(*kapi.Pod)
+	if pod.Spec.HostNetwork {
+		return
+	}
+	var key string
+	var err error
+	if key, err = cache.MetaNamespaceKeyFunc(obj); err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+	klog.V(3).Infof("enqueue delete pod %s", key)
+	c.deletePodQueue.AddRateLimited(key)
 }
 
-// WatchEndpoints starts the watching of Endpoint resource and calls back the appropriate handler logic
-func (oc *Controller) WatchEndpoints() error {
-	_, err := oc.watchFactory.AddEndpointsHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			ep := obj.(*kapi.Endpoints)
-			err := oc.AddEndpoints(ep)
-			if err != nil {
-				logrus.Errorf("Error in adding load balancer: %v", err)
-			}
-		},
-		UpdateFunc: func(old, new interface{}) {
-			epNew := new.(*kapi.Endpoints)
-			epOld := old.(*kapi.Endpoints)
-			if reflect.DeepEqual(epNew.Subsets, epOld.Subsets) {
-				return
-			}
-			if len(epNew.Subsets) == 0 {
-				err := oc.deleteEndpoints(epNew)
-				if err != nil {
-					logrus.Errorf("Error in deleting endpoints - %v", err)
-				}
-			} else {
-				err := oc.AddEndpoints(epNew)
-				if err != nil {
-					logrus.Errorf("Error in modifying endpoints: %v", err)
-				}
-			}
-		},
-		DeleteFunc: func(obj interface{}) {
-			ep := obj.(*kapi.Endpoints)
-			err := oc.deleteEndpoints(ep)
-			if err != nil {
-				logrus.Errorf("Error in deleting endpoints - %v", err)
-			}
-		},
-	}, nil)
-	return err
+func (c *Controller) enqueueUpdatePod(oldObj, newObj interface{}) {
+	podOld := oldObj.(*kapi.Pod)
+	podNew := newObj.(*kapi.Pod)
+	if podOld.Spec.HostNetwork || podNew.Spec.HostNetwork {
+		return
+	}
+	if podNew.Annotations[values.IPAddressStatic] != "" {
+		return
+	}
+	var key string
+	var err error
+	if key, err = cache.MetaNamespaceKeyFunc(newObj); err != nil {
+		utilruntime.HandleError(err)
+		return
+	}
+	klog.V(3).Infof("enqueue delete pod %s", key)
+	c.updatePodQueue.AddRateLimited(key)
 }
 
-// WatchNetworkPolicy starts the watching of network policy resource and calls
-// back the appropriate handler logic
-func (oc *Controller) WatchNetworkPolicy() error {
-	_, err := oc.watchFactory.AddPolicyHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			policy := obj.(*kapisnetworking.NetworkPolicy)
-			oc.AddNetworkPolicy(policy)
-			return
-		},
-		UpdateFunc: func(old, newer interface{}) {
-			oldPolicy := old.(*kapisnetworking.NetworkPolicy)
-			newPolicy := newer.(*kapisnetworking.NetworkPolicy)
-			if !reflect.DeepEqual(oldPolicy, newPolicy) {
-				oc.deleteNetworkPolicy(oldPolicy)
-				oc.AddNetworkPolicy(newPolicy)
-			}
-			return
-		},
-		DeleteFunc: func(obj interface{}) {
-			policy := obj.(*kapisnetworking.NetworkPolicy)
-			oc.deleteNetworkPolicy(policy)
-			return
-		},
-	}, oc.syncNetworkPolicies)
-	return err
+func (c *Controller) runAddPodWorker() {
+	for c.processNextAddPodWorkItem() {
+	}
 }
 
-// WatchNamespaces starts the watching of namespace resource and calls
-// back the appropriate handler logic
-func (oc *Controller) WatchNamespaces() error {
-	_, err := oc.watchFactory.AddNamespaceHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			ns := obj.(*kapi.Namespace)
-			oc.AddNamespace(ns)
-			return
-		},
-		UpdateFunc: func(old, newer interface{}) {
-			// We only use namespace's name and that does not get updated.
-			return
-		},
-		DeleteFunc: func(obj interface{}) {
-			ns := obj.(*kapi.Namespace)
-			oc.deleteNamespace(ns)
-			return
-		},
-	}, oc.syncNamespaces)
-	return err
+// processNextWorkItem will read a single work item off the workqueue and
+// attempt to process it, by calling the syncHandler.
+func (c *Controller) processNextAddPodWorkItem() bool {
+	obj, shutdown := c.addPodQueue.Get()
+
+	if shutdown {
+		return false
+	}
+
+	// We wrap this block in a func so we can defer c.workqueue.Done.
+	err := func(obj interface{}) error {
+		// We call Done here so the workqueue knows we have finished
+		// processing this item. We also must remember to call Forget if we
+		// do not want this work item being re-queued. For example, we do
+		// not call Forget if a transient error occurs, instead the item is
+		// put back on the workqueue and attempted again after a back-off
+		// period.
+		defer c.addPodQueue.Done(obj)
+		var key string
+		var ok bool
+		// We expect strings to come off the workqueue. These are of the
+		// form namespace/name. We do this as the delayed nature of the
+		// workqueue means the items in the informer cache may actually be
+		// more up to date that when the item was initially put onto the
+		// workqueue.
+		if key, ok = obj.(string); !ok {
+			// As the item in the workqueue is actually invalid, we call
+			// Forget here else we'd go into a loop of attempting to
+			// process a work item that is invalid.
+			c.addPodQueue.Forget(obj)
+			utilruntime.HandleError(fmt.Errorf("expected string in workqueue but got %#v", obj))
+			return nil
+		}
+		// Run the syncHandler, passing it the namespace/name string of the
+		// Foo resource to be synced.
+		if err := c.addPod(key); err != nil {
+			// Put the item back on the workqueue to handle any transient errors.
+			c.addPodQueue.AddRateLimited(key)
+			return fmt.Errorf("error syncing '%s': %s, requeuing", key, err.Error())
+		}
+		// Finally, if no error occurs we Forget this item so it does not
+		// get queued again until another change happens.
+		c.addPodQueue.Forget(obj)
+		return nil
+	}(obj)
+
+	if err != nil {
+		utilruntime.HandleError(err)
+		return true
+	}
+
+	return true
 }
 
-// WatchNodes starts the watching of node resource and calls
-// back the appropriate handler logic
-func (oc *Controller) WatchNodes() error {
-	_, err := oc.watchFactory.AddNodeHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj interface{}) {},
-		UpdateFunc: func(old, new interface{}) {},
-		DeleteFunc: func(obj interface{}) {
-			node := obj.(*kapi.Node)
-			logrus.Debugf("Delete event for Node %q. Removing the node from "+
-				"various caches", node.Name)
-
-			oc.lsMutex.Lock()
-			delete(oc.gatewayCache, node.Name)
-			delete(oc.logicalSwitchCache, node.Name)
-			oc.lsMutex.Unlock()
-		},
-	}, nil)
-	return err
+func (c *Controller) runDeletePodWorker() {
+	for c.processNextDeletePodWorkItem() {
+	}
 }
 
-// WatchDeployments starts the watching of deployment resource and calls
-// back the appropriate handler logic
-func (oc *Controller) WatchDeployments() error {
-	_, err := oc.watchFactory.AdddeploymentHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			deployment := obj.(*kapps.Deployment)
-			oc.AddDeployment(deployment)
-			return
-		},
-		UpdateFunc: func(old, newer interface{}) {
-			oldDeployment := old.(*kapps.Deployment)
-			newDeployment := newer.(*kapps.Deployment)
-			oc.UpdateDeployment(oldDeployment, newDeployment)
-			return
-		},
-		DeleteFunc: func(obj interface{}) {
-			deployment := obj.(*kapps.Deployment)
-			oc.DeleteDeployment(deployment)
-			return
-		},
-	}, oc.syncDeployments)
-	return err
+// attempt to process it, by calling the syncHandler.
+func (c *Controller) processNextDeletePodWorkItem() bool {
+	obj, shutdown := c.deletePodQueue.Get()
+
+	if shutdown {
+		return false
+	}
+
+	// We wrap this block in a func so we can defer c.workqueue.Done.
+	err := func(obj interface{}) error {
+		// We call Done here so the workqueue knows we have finished
+		// processing this item. We also must remember to call Forget if we
+		// do not want this work item being re-queued. For example, we do
+		// not call Forget if a transient error occurs, instead the item is
+		// put back on the workqueue and attempted again after a back-off
+		// period.
+		defer c.deletePodQueue.Done(obj)
+		var key string
+		var ok bool
+		// We expect strings to come off the workqueue. These are of the
+		// form namespace/name. We do this as the delayed nature of the
+		// workqueue means the items in the informer cache may actually be
+		// more up to date that when the item was initially put onto the
+		// workqueue.
+		if key, ok = obj.(string); !ok {
+			// As the item in the workqueue is actually invalid, we call
+			// Forget here else we'd go into a loop of attempting to
+			// process a work item that is invalid.
+			c.deletePodQueue.Forget(obj)
+			utilruntime.HandleError(fmt.Errorf("expected string in workqueue but got %#v", obj))
+			return nil
+		}
+		// Run the syncHandler, passing it the namespace/name string of the
+		// Foo resource to be synced.
+		if err := c.deletePod(key); err != nil {
+			// Put the item back on the workqueue to handle any transient errors.
+			c.deletePodQueue.AddRateLimited(key)
+			return fmt.Errorf("error syncing '%s': %s, requeuing", key, err.Error())
+		}
+		// Finally, if no error occurs we Forget this item so it does not
+		// get queued again until another change happens.
+		c.deletePodQueue.Forget(obj)
+		return nil
+	}(obj)
+
+	if err != nil {
+		utilruntime.HandleError(err)
+		return true
+	}
+
+	return true
+}
+
+func (c *Controller) runUpdatePodWorker() {
+	for c.processNextUpdatePodWorkItem() {
+	}
+}
+
+func (c *Controller) processNextUpdatePodWorkItem() bool {
+	obj, shutdown := c.updatePodQueue.Get()
+
+	if shutdown {
+		return false
+	}
+
+	// We wrap this block in a func so we can defer c.workqueue.Done.
+	err := func(obj interface{}) error {
+		// We call Done here so the workqueue knows we have finished
+		// processing this item. We also must remember to call Forget if we
+		// do not want this work item being re-queued. For example, we do
+		// not call Forget if a transient error occurs, instead the item is
+		// put back on the workqueue and attempted again after a back-off
+		// period.
+		defer c.updatePodQueue.Done(obj)
+		var key string
+		var ok bool
+		// We expect strings to come off the workqueue. These are of the
+		// form namespace/name. We do this as the delayed nature of the
+		// workqueue means the items in the informer cache may actually be
+		// more up to date that when the item was initially put onto the
+		// workqueue.
+		if key, ok = obj.(string); !ok {
+			// As the item in the workqueue is actually invalid, we call
+			// Forget here else we'd go into a loop of attempting to
+			// process a work item that is invalid.
+			c.updatePodQueue.Forget(obj)
+			utilruntime.HandleError(fmt.Errorf("expected string in workqueue but got %#v", obj))
+			return nil
+		}
+		// Run the syncHandler, passing it the namespace/name string of the
+		// Foo resource to be synced.
+		if err := c.updatePod(key); err != nil {
+			// Put the item back on the workqueue to handle any transient errors.
+			c.updatePodQueue.AddRateLimited(key)
+			return fmt.Errorf("error syncing '%s': %s, requeuing", key, err.Error())
+		}
+		// Finally, if no error occurs we Forget this item so it does not
+		// get queued again until another change happens.
+		c.updatePodQueue.Forget(obj)
+		return nil
+	}(obj)
+
+	if err != nil {
+		utilruntime.HandleError(err)
+		return true
+	}
+
+	return true
 }

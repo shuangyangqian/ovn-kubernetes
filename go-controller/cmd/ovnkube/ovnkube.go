@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/ipam"
 	"io"
 	"io/ioutil"
 	"net"
@@ -21,9 +20,11 @@ import (
 	ovncluster "github.com/openvswitch/ovn-kubernetes/go-controller/pkg/cluster"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/ipam"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/ovn"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
 
+	"k8s.io/sample-controller/pkg/signals"
 	kexec "k8s.io/utils/exec"
 )
 
@@ -236,7 +237,7 @@ func runOvnKube(ctx *cli.Context) error {
 	// the netController come from params net-controller
 	// only master should add this params, node doesn't need
 	if netController {
-		ovnController := ovn.NewOvnController(clientset, factory, nodePortEnable)
+		ovnController := ovn.NewOvnController(clientset, nodePortEnable)
 		//if clusterController.OvnHA {
 		//	err := clusterController.RebuildOVNDatabase(master, ovnController)
 		//	if err != nil {
@@ -244,7 +245,8 @@ func runOvnKube(ctx *cli.Context) error {
 		//		panic(err.Error())
 		//	}
 		//}
-		if err := ovnController.Run(); err != nil {
+		stopCh := signals.SetupSignalHandler()
+		if err := ovnController.Run(stopCh); err != nil {
 			logrus.Errorf(err.Error())
 			panic(err.Error())
 		}

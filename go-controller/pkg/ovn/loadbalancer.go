@@ -12,9 +12,6 @@ import (
 
 func (ovn *Controller) getLoadBalancer(protocol kapi.Protocol) (string,
 	error) {
-	if outStr, ok := ovn.loadbalancerClusterCache[string(protocol)]; ok {
-		return outStr, nil
-	}
 
 	var out string
 	var err error
@@ -33,14 +30,10 @@ func (ovn *Controller) getLoadBalancer(protocol kapi.Protocol) (string,
 	if out == "" {
 		return "", fmt.Errorf("no load-balancer found in the database")
 	}
-	ovn.loadbalancerClusterCache[string(protocol)] = out
 	return out, nil
 }
 
 func (ovn *Controller) getDefaultGatewayLoadBalancer(protocol kapi.Protocol) string {
-	if outStr, ok := ovn.loadbalancerGWCache[string(protocol)]; ok {
-		return outStr
-	}
 
 	var gw string
 	gw, _, _ = util.RunOVNNbctl("--data=bare",
@@ -55,9 +48,6 @@ func (ovn *Controller) getDefaultGatewayLoadBalancer(protocol kapi.Protocol) str
 	lb, _, _ := util.RunOVNNbctl("--data=bare",
 		"--no-heading", "--columns=_uuid", "find", "load_balancer",
 		"external_ids:"+externalIDKey+"="+gw)
-	if len(lb) != 0 {
-		ovn.loadbalancerGWCache[string(protocol)] = lb
-	}
 	return lb
 }
 

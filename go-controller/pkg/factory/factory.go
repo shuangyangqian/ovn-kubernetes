@@ -2,7 +2,6 @@ package factory
 
 import (
 	"fmt"
-	"k8s.io/api/extensions/v1beta1"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -10,7 +9,6 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	kapps "k8s.io/api/apps/v1"
 	kapi "k8s.io/api/core/v1"
 	knet "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -84,14 +82,12 @@ func newInformer(oType reflect.Type, sharedInformer cache.SharedIndexInformer) *
 }
 
 var (
-	podType                     reflect.Type = reflect.TypeOf(&kapi.Pod{})
-	serviceType                 reflect.Type = reflect.TypeOf(&kapi.Service{})
-	endpointsType               reflect.Type = reflect.TypeOf(&kapi.Endpoints{})
-	policyType                  reflect.Type = reflect.TypeOf(&knet.NetworkPolicy{})
-	namespaceType               reflect.Type = reflect.TypeOf(&kapi.Namespace{})
-	nodeType                    reflect.Type = reflect.TypeOf(&kapi.Node{})
-	deploymentAppsType          reflect.Type = reflect.TypeOf(&kapps.Deployment{})
-	deploymentExtensionsV1Beta1 reflect.Type = reflect.TypeOf(&v1beta1.Deployment{})
+	podType       reflect.Type = reflect.TypeOf(&kapi.Pod{})
+	serviceType   reflect.Type = reflect.TypeOf(&kapi.Service{})
+	endpointsType reflect.Type = reflect.TypeOf(&kapi.Endpoints{})
+	policyType    reflect.Type = reflect.TypeOf(&knet.NetworkPolicy{})
+	namespaceType reflect.Type = reflect.TypeOf(&kapi.Namespace{})
+	nodeType      reflect.Type = reflect.TypeOf(&kapi.Node{})
 )
 
 // NewWatchFactory initializes a new watch factory
@@ -114,7 +110,6 @@ func NewWatchFactory(c kubernetes.Interface, stopChan chan struct{}) (*WatchFact
 	wf.informers[policyType] = newInformer(policyType, wf.iFactory.Networking().V1().NetworkPolicies().Informer())
 	wf.informers[namespaceType] = newInformer(namespaceType, wf.iFactory.Core().V1().Namespaces().Informer())
 	wf.informers[nodeType] = newInformer(nodeType, wf.iFactory.Core().V1().Nodes().Informer())
-	wf.informers[deploymentAppsType] = newInformer(deploymentAppsType, wf.iFactory.Apps().V1().Deployments().Informer())
 
 	wf.iFactory.Start(stopChan)
 	res := wf.iFactory.WaitForCacheSync(stopChan)
@@ -304,11 +299,6 @@ func (wf *WatchFactory) removeHandler(objType reflect.Type, handler *Handler) er
 	}()
 
 	return nil
-}
-
-// AddPodHandler adds a handler function that will be executed on Pod object changes
-func (wf *WatchFactory) AdddeploymentHandler(handlerFuncs cache.ResourceEventHandler, processExisting func([]interface{})) (*Handler, error) {
-	return wf.addHandler(deploymentAppsType, "", nil, handlerFuncs, processExisting)
 }
 
 // AddPodHandler adds a handler function that will be executed on Pod object changes

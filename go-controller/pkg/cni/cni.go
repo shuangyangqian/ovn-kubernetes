@@ -3,7 +3,6 @@ package cni
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/values"
 	"net"
 	"time"
 
@@ -85,7 +84,7 @@ func (pr *PodRequest) cmdAdd() *PodResult {
 			logrus.Warningf("Error while obtaining pod annotations - %v", err)
 			return false, nil
 		}
-		if _, ok := annotation[values.IPAddressStatic]; ok {
+		if _, ok := annotation["ovn"]; ok {
 			return true, nil
 		}
 		return false, nil
@@ -94,34 +93,33 @@ func (pr *PodRequest) cmdAdd() *PodResult {
 		return nil
 	}
 
-	//if !ok {
-	//	logrus.Errorf("failed to get ovn annotation from pod")
-	//	return nil
-	//}
-	//
-	//var ovnAnnotatedMap map[string]string
-	//err = json.Unmarshal([]byte(ovnAnnotation), &ovnAnnotatedMap)
-	//if err != nil {
-	//	logrus.Errorf("unmarshal ovn annotation failed")
-	//	return nil
-	//}
+	ovnAnnotation, ok := annotation["ovn"]
+	if !ok {
+		logrus.Errorf("failed to get ovn annotation from pod")
+		return nil
+	}
 
-	ipAddress := annotation[values.IPAddressStatic]
-	macAddress := annotation[values.MacAddressStatic]
-	gatewayIP := annotation[values.PodGatewayIP]
+	var ovnAnnotatedMap map[string]string
+	err = json.Unmarshal([]byte(ovnAnnotation), &ovnAnnotatedMap)
+	if err != nil {
+		logrus.Errorf("unmarshal ovn annotation failed")
+		return nil
+	}
+
+	ipAddress := ovnAnnotatedMap["ip_address"]
+	macAddress := ovnAnnotatedMap["mac_address"]
+	gatewayIP := ovnAnnotatedMap["gateway_ip"]
 
 	if ipAddress == "" || macAddress == "" || gatewayIP == "" {
 		logrus.Errorf("failed in pod annotation key extract")
 		return nil
 	}
 
-	var ingress, egress int64
-	// config bw for pod port, just notes this and renote it back later
-	//ingress, egress, err := extractPodBandwidthResources(annotation)
-	//if err != nil {
-	//	logrus.Errorf("failed to parse bandwidth request: %v", err)
-	//	return nil
-	//}
+	ingress, egress, err := extractPodBandwidthResources(annotation)
+	if err != nil {
+		logrus.Errorf("failed to parse bandwidth request: %v", err)
+		return nil
+	}
 
 	var interfacesArray []*current.Interface
 	interfacesArray, err = pr.ConfigureInterface(namespace, podName, macAddress, ipAddress, gatewayIP, config.Default.MTU, ingress, egress)

@@ -57,7 +57,18 @@ var (
 
 	// OvnSouth holds southbound OVN database client and server authentication and location details
 	OvnSouth OvnAuthConfig
+
+	Etcd = EtcdConfig{
+		Endpoints: "127.0.0.1:2379",
+	}
 )
+
+type EtcdConfig struct {
+	Endpoints string `gcfg:"etcd-endpoints"`
+	CertFile  string `gcfg:"etcd-certfile"`
+	KeyFile   string `gcfg:"etcd-keyfile"`
+	Cafile    string `gcfg:"etcd-cafile"`
+}
 
 // DefaultConfig holds parsed config file parameters and command-line overrides
 type DefaultConfig struct {
@@ -134,6 +145,7 @@ const (
 // Config is used to read the structured config file and to cache config in testcases
 type config struct {
 	Default    DefaultConfig
+	Etcd       EtcdConfig
 	Logging    LoggingConfig
 	CNI        CNIConfig
 	Kubernetes KubernetesConfig
@@ -148,6 +160,7 @@ var (
 	savedKubernetes KubernetesConfig
 	savedOvnNorth   OvnAuthConfig
 	savedOvnSouth   OvnAuthConfig
+	savedEtcd       EtcdConfig
 )
 
 func init() {
@@ -158,11 +171,13 @@ func init() {
 	savedKubernetes = Kubernetes
 	savedOvnNorth = OvnNorth
 	savedOvnSouth = OvnSouth
+	savedEtcd = Etcd
 	Flags = append(Flags, CommonFlags...)
 	Flags = append(Flags, K8sFlags...)
 	Flags = append(Flags, OvnNBFlags...)
 	Flags = append(Flags, OvnSBFlags...)
 	Flags = append(Flags, OVNGatewayFlags...)
+	Flags = append(Flags, EtcdFlags...)
 }
 
 // RestoreDefaultConfig restores default config values. Used by testcases to
@@ -335,6 +350,29 @@ var K8sFlags = []cli.Flag{
 	},
 }
 
+var EtcdFlags = []cli.Flag{
+	cli.StringFlag{
+		Name:        "etcd-endpoints",
+		Usage:       "etcd endpoints, eg: 127.0.0.1:2379,10.3.2.3:2379",
+		Destination: &cliConfig.Etcd.Endpoints,
+	},
+	cli.StringFlag{
+		Name:        "etcd-certfile",
+		Usage:       "etcd cert file path, eg: /etc/ssl/etcd/cert.pem",
+		Destination: &cliConfig.Etcd.CertFile,
+	},
+	cli.StringFlag{
+		Name:        "etcd-keyfile",
+		Usage:       "etcd key file path, eg: /etc/ssl/etcd/key.pem",
+		Destination: &cliConfig.Etcd.KeyFile,
+	},
+	cli.StringFlag{
+		Name:        "etcd-cafile",
+		Usage:       "etcd ca file path, eg: /etc/ssl/etcd/ca.pem",
+		Destination: &cliConfig.Etcd.Cafile,
+	},
+}
+
 // OvnNBFlags capture OVN northbound database options
 var OvnNBFlags = []cli.Flag{
 	cli.StringFlag{
@@ -389,6 +427,10 @@ var OvnSBFlags = []cli.Flag{
 
 //OVNGatewayFlags capture L3 Gateway related flags
 var OVNGatewayFlags = []cli.Flag{
+	cli.StringFlag{
+		Name:  "gateway-ip",
+		Usage: "the subnet's gateway ip address",
+	},
 	cli.BoolFlag{
 		Name:  "init-gateways",
 		Usage: "initialize a gateway in the minion. Only useful with \"init-node\"",

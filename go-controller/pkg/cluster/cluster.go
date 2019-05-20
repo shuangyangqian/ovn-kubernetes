@@ -2,13 +2,13 @@ package cluster
 
 import (
 	"fmt"
+	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
 	"net"
 
 	"github.com/openshift/origin/pkg/util/netutils"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/factory"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/kube"
-	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -24,20 +24,15 @@ type OvnClusterController struct {
 	ClusterServicesSubnet string
 	ClusterIPNet          []CIDRNetworkEntry
 
-	GatewayInit      bool
-	GatewayIntf      string
-	GatewayBridge    string
-	GatewayNextHop   string
-	GatewaySpareIntf bool
-	GatewayVLANID    uint
-	NodePortEnable   bool
-	OvnHA            bool
-	LocalnetGateway  bool
+	GatewayIP string
+	MTU       string
+	Mask      int
 }
 
 // CIDRNetworkEntry is the object that holds the definition for a single network CIDR range
 type CIDRNetworkEntry struct {
-	CIDR             *net.IPNet
+	CIDR *net.IPNet
+	// HostSubnetLength means that how many IP on one node
 	HostSubnetLength uint32
 }
 
@@ -72,7 +67,6 @@ func setupOVNNode(nodeName string) error {
 	}
 
 	var err error
-
 	nodeIP := config.Default.EncapIP
 	if nodeIP == "" {
 		nodeIP, err = netutils.GetNodeIP(nodeName)

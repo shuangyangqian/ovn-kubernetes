@@ -1,5 +1,6 @@
 .eggs
 *.pyc
+.idea/
 
 vagrant/k8s/
 vagrant/.vagrant/

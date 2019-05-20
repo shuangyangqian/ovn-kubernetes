@@ -1,6 +1,7 @@
 package cni
 
 import (
+	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/ipam"
 	"net/http"
 
 	"github.com/containernetworking/cni/pkg/types"
@@ -52,6 +53,8 @@ type PodRequest struct {
 	CNIConf *types.NetConf
 	// Channel for returning the operation result to the Server
 	Result chan *PodResult
+	// etcd config
+	EtcdClient *ipam.EtcdV3Client
 }
 
 // PodResult of a PodRequest sent through the PodRequest's Result channel.
@@ -70,4 +73,5 @@ type Server struct {
 	http.Server
 	requestFunc cniRequestFunc
 	rundir      string
+	EtcdClient  *ipam.EtcdV3Client
 }

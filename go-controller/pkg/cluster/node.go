@@ -1,35 +1,84 @@
 package cluster
 
 import (
-	"github.com/sirupsen/logrus"
+	"net"
 	"os"
 	"path/filepath"
+	"time"
+
+	"github.com/sirupsen/logrus"
 
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/cni"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/config"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/ovn"
-	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
 
 	kapi "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
 
-const LogicSwitchPrefix = "k8s"
-
 // StartClusterNode learns the subnet assigned to it by the master controller
 // and calls the SetupNode script which establishes the logical switch
 func (cluster *OvnClusterController) StartClusterNode(name string) error {
-	// Make sure br-int is created.
-	stdout, stderr, err := util.RunOVSVsctl("--", "--may-exist", "add-br", "br-int")
-	if err != nil {
-		logrus.Errorf("Failed to create br-int, stdout: %q, stderr: %q, error: %v", stdout, stderr, err)
+	count := 300
+	var err error
+	var node *kapi.Node
+	var subnet *net.IPNet
+	var clusterSubnets []string
+
+	for _, clusterSubnet := range cluster.ClusterIPNet {
+		clusterSubnets = append(clusterSubnets, clusterSubnet.CIDR.String())
+	}
+
+	for count > 0 {
+		if count != 300 {
+			time.Sleep(time.Second)
+		}
+		count--
+
+		// setup the node, create the logical switch
+		node, err = cluster.Kube.GetNode(name)
+		if err != nil {
+			logrus.Errorf("Error starting node %s, no node found - %v", name, err)
+			continue
+		}
+
+		sub, ok := node.Annotations[OvnHostSubnet]
+		if !ok {
+			logrus.Errorf("Error starting node %s, no annotation found on node for subnet - %v", name, err)
+			continue
+		}
+		_, subnet, err = net.ParseCIDR(sub)
+		if err != nil {
+			logrus.Errorf("Invalid hostsubnet found for node %s - %v", node.Name, err)
+			return err
+		}
+		break
+	}
+
+	if count == 0 {
+		logrus.Errorf("Failed to get node/node-annotation for %s - %v", name, err)
 		return err
 	}
 
-	// set ovn connection on node's ovs
+	logrus.Infof("Node %s ready for ovn initialization with subnet %s", node.Name, subnet.String())
+
 	err = setupOVNNode(name)
 	if err != nil {
 		return err
+	}
+
+	err = ovn.CreateManagementPort(node.Name, subnet.String(),
+		cluster.ClusterServicesSubnet,
+		clusterSubnets)
+	if err != nil {
+		return err
+	}
+
+	if cluster.GatewayInit {
+		err = cluster.initGateway(node.Name, clusterSubnets, subnet.String())
+		if err != nil {
+			return err
+		}
 	}
 
 	confFile := filepath.Join(config.CNI.ConfDir, config.CNIConfFileName)
@@ -39,6 +88,11 @@ func (cluster *OvnClusterController) StartClusterNode(name string) error {
 		if err != nil {
 			return err
 		}
+	}
+
+	if cluster.OvnHA {
+		err = cluster.watchNamespaceUpdate(node, subnet.String())
+		return err
 	}
 
 	// start the cni server
@@ -75,6 +129,14 @@ func (cluster *OvnClusterController) updateOvnNode(masterIP string,
 		clusterSubnets)
 	if err != nil {
 		return err
+	}
+
+	// Reinit Gateway for this node if the --init-gateways flag is set
+	if cluster.GatewayInit {
+		err = cluster.initGateway(node.Name, clusterSubnets, subnet)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil

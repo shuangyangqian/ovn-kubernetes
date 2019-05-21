@@ -3,7 +3,6 @@ package cni
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/ipam"
 	"io/ioutil"
 	"net/http"
 	"strings"
@@ -78,7 +77,7 @@ func gatherCNIArgs(env map[string]string) (map[string]string, error) {
 	return mapArgs, nil
 }
 
-func cniRequestToPodRequest(r *http.Request, c *ipam.EtcdV3Client) (*PodRequest, error) {
+func cniRequestToPodRequest(r *http.Request) (*PodRequest, error) {
 	var cr Request
 	b, _ := ioutil.ReadAll(r.Body)
 	if err := json.Unmarshal(b, &cr); err != nil {
@@ -91,9 +90,8 @@ func cniRequestToPodRequest(r *http.Request, c *ipam.EtcdV3Client) (*PodRequest,
 	}
 
 	req := &PodRequest{
-		Command:    command(cmd),
-		Result:     make(chan *PodResult),
-		EtcdClient: c,
+		Command: command(cmd),
+		Result:  make(chan *PodResult),
 	}
 
 	req.SandboxID, ok = cr.Env["CNI_CONTAINERID"]

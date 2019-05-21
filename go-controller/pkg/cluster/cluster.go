@@ -2,8 +2,8 @@ package cluster
 
 import (
 	"fmt"
+	"github.com/Sirupsen/logrus"
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/util"
-	"k8s.io/klog/glog"
 	"net"
 
 	"github.com/openvswitch/ovn-kubernetes/go-controller/pkg/config"
@@ -114,14 +114,14 @@ func GetNodeIP(nodeName string) (string, error) {
 		for _, addr := range addrs {
 			// Skip loopback and non IPv4 addrs
 			if addr.IsLoopback() || addr.To4() == nil {
-				glog.V(5).Infof("Skipping loopback/non-IPv4 addr: %q for node %s", addr.String(), nodeName)
+				logrus.Debugf("Skipping loopback/non-IPv4 addr: %q for node %s", addr.String(), nodeName)
 				continue
 			}
 			ip = addr
 			break
 		}
 	} else if ip.IsLoopback() || ip.To4() == nil {
-		glog.V(5).Infof("Skipping loopback/non-IPv4 addr: %q for node %s", ip.String(), nodeName)
+		logrus.Debugf("Skipping loopback/non-IPv4 addr: %q for node %s", ip.String(), nodeName)
 		ip = nil
 	}
 
